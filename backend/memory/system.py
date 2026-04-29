@@ -90,7 +90,10 @@ class MemorySystem:
         }
 
     def save(self):
-        """Persist LTM and emotional memory to disk."""
+        """Persist STM, LTM, and emotional memory to disk."""
+        # Save STM (conversation buffer)
+        with open(os.path.join(self.base_path, "stm.json"), "w") as f:
+            json.dump(self.stm, f)
         # Save LTM Index
         faiss.write_index(self.ltm_index, os.path.join(self.base_path, "ltm_index.faiss"))
         # Save LTM Corpus
@@ -99,9 +102,16 @@ class MemorySystem:
         # Save Emotional History
         with open(os.path.join(self.base_path, "emotional_history.json"), "w") as f:
             json.dump(self.emotional_history, f)
+        print(f"💾 Memory saved — STM: {len(self.stm)} turns, LTM: {len(self.ltm_corpus)} entries")
 
     def load(self):
         """Load memory from disk."""
+        # Load STM (conversation buffer)
+        stm_path = os.path.join(self.base_path, "stm.json")
+        if os.path.exists(stm_path):
+            with open(stm_path, "r") as f:
+                self.stm = json.load(f)
+        
         idx_path = os.path.join(self.base_path, "ltm_index.faiss")
         if os.path.exists(idx_path):
             self.ltm_index = faiss.read_index(idx_path)
@@ -115,3 +125,5 @@ class MemorySystem:
         if os.path.exists(eh_path):
             with open(eh_path, "r") as f:
                 self.emotional_history = json.load(f)
+        
+        print(f"🧠 Memory loaded — STM: {len(self.stm)} turns, LTM: {len(self.ltm_corpus)} entries")
