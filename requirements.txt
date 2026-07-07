@@ -2,6 +2,7 @@ vaderSentiment==3.3.2
 ollama==0.4.4
 sentence-transformers>=2.2.0
 faiss-cpu>=1.7.4
+requests>=2.31.0
 
 # Voice Communication Dependencies
 SpeechRecognition==3.10.0

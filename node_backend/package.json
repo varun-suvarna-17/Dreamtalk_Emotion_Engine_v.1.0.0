@@ -1,0 +1,17 @@
+{
+  "name": "dreamtalk-brain-backend",
+  "version": "1.0.0",
+  "description": "DreamTalk integration Express API to write brain outputs to Supabase",
+  "type": "module",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node app.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
