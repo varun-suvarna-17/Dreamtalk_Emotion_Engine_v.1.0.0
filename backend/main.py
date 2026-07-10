@@ -3,14 +3,22 @@ Brain Module Backend for DreamTalk.
 Standalone system focused on Thinking, Emotion, Personality, and Memory.
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import uvicorn
 import sys
 import os
 import asyncio
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Sentiment analyser (shared instance — lightweight, thread-safe)
+_vader = SentimentIntensityAnalyzer()
 
 # Ensure all modules are in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +28,17 @@ from memory.system import MemorySystem
 from models.brain import NeuralBrainSimulation, BigFiveTraits
 from llm.service import LLMService, PromptCompiler
 
-app = FastAPI(title="DreamTalk Brain Module API")
+# ---------------------------------------------------------------------------
+# Fix 3 — FastAPI lifespan (replaces deprecated @app.on_event)
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load memory on startup; persist it on shutdown."""
+    memory_system.load()
+    yield
+    memory_system.save()
+
+app = FastAPI(title="DreamTalk Brain Module API", lifespan=lifespan)
 
 # Enable CORS
 app.add_middleware(
@@ -35,7 +53,7 @@ app.add_middleware(
 emotion_engine = PADEmotionEngine(inertia=0.85)
 memory_system = MemorySystem()
 brain_sim = NeuralBrainSimulation()
-llm_service = LLMService(model_name="llama3:8b") # Default to 8B for broader compatibility
+llm_service = LLMService()  # Provider & model read from .env (auto-failover: Groq → Ollama)
 
 # Persistent Global Persona
 persona = {
@@ -66,33 +84,41 @@ class PersonaUpdate(BaseModel):
 @app.post("/chat")
 async def chat(request: ChatRequest):
     try:
-        # 1. Analyze input -> PAD Stimulus
-        # Simulating sentiment analysis for the stimulus
-        sentiment_score = 0.0 # This would be replaced by a real sentiment model
+        # 1. Fix 1 — Dynamic VADER sentiment → PAD Stimulus
+        scores = _vader.polarity_scores(request.user_input)
+        sentiment_score = scores["compound"]  # Range: -1.0 (very negative) to +1.0 (very positive)
         stimulus = emotion_engine.stimulus_from_sentiment(sentiment_score)
-        
+
         # 2. Update Emotional State
         current_emotion = emotion_engine.update(stimulus)
-        
+
         # 3. Retrieve Context from 3-layer Memory
         context = memory_system.retrieve_context(request.user_input)
-        
+
         # 4. Neural Brain Decision
         decision = brain_sim.process_decision(request.user_input, current_emotion, context)
-        
+
         # 5. Compile Advanced Personality-Driven Prompt
         system_prompt = PromptCompiler.build_advanced_prompt(
             persona, current_emotion, context, decision
         )
         llm_service.set_system_prompt(system_prompt)
-        
-        # 6. Generate Response (Asynchronous)
-        messages = [{"role": "user", "content": request.user_input}]
+
+        # 6. Fix 2 — Inject STM history so the LLM remembers the conversation
+        # Format: [system] + [stm turns as user/assistant pairs] + [current user turn]
+        stm_messages: List[Dict] = []
+        for turn in context.get("stm", []):
+            if turn.get("user"):
+                stm_messages.append({"role": "user",      "content": turn["user"]})
+            if turn.get("assistant"):
+                stm_messages.append({"role": "assistant", "content": turn["assistant"]})
+
+        messages = stm_messages + [{"role": "user", "content": request.user_input}]
         response = await llm_service.generate_response_async(messages)
-        
+
         # 7. Update Memory with the new interaction
         memory_system.add_interaction(request.user_input, response, current_emotion)
-        
+
         return {
             "response": response,
             "emotion": current_emotion,
