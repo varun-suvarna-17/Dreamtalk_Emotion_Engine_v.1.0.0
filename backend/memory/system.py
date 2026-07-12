@@ -7,6 +7,7 @@ import os
 import json
 import faiss
 import numpy as np
+import logging
 from typing import List, Dict, Optional
 from sentence_transformers import SentenceTransformer
 
@@ -15,6 +16,7 @@ class MemorySystem:
         # Layer 1: Short-Term Memory (Session Buffer)
         self.stm: List[Dict] = []
         self.stm_limit = 20
+        self.turn_counters: Dict[str, int] = {}
         
         # Layer 2: Long-Term Memory (Vector DB)
         self.ltm_model = SentenceTransformer(model_name)
@@ -29,7 +31,13 @@ class MemorySystem:
         self.base_path = "data/memory"
         os.makedirs(self.base_path, exist_ok=True)
 
-    def add_interaction(self, user_input: str, response: str, emotion: Dict):
+    def next_turn(self, session_id: str) -> int:
+        if session_id not in self.turn_counters:
+            self.turn_counters[session_id] = 0
+        self.turn_counters[session_id] += 1
+        return self.turn_counters[session_id]
+
+    def add_interaction(self, user_input: str, response: str, emotion: Dict, user_id: str, session_id: str, node_client):
         """Add a complete interaction to the 3-layer memory system."""
         interaction = {
             "user": user_input,
@@ -43,7 +51,7 @@ class MemorySystem:
         if len(self.stm) > self.stm_limit:
             # When STM overflows, push oldest to LTM
             oldest = self.stm.pop(0)
-            self._add_to_ltm(oldest)
+            self._add_to_ltm(oldest, user_id, session_id, node_client)
             
         # Update Emotional Memory
         self.emotional_history.append({
@@ -52,15 +60,31 @@ class MemorySystem:
             "timestamp": interaction["timestamp"]
         })
 
-    def _add_to_ltm(self, interaction: Dict):
+    def _add_to_ltm(self, interaction: Dict, user_id: str, session_id: str, node_client):
         """Push interaction to the vector database."""
         text = f"User said: {interaction['user']}\nDreamTalk responded: {interaction['assistant']}"
         embedding = self.ltm_model.encode([text])[0]
-        embedding = np.array(embedding, dtype="float32")
-        faiss.normalize_L2(embedding.reshape(1, -1))
         
-        self.ltm_index.add(embedding.reshape(1, -1))
+        # Local FAISS LTM
+        faiss_embedding = np.array(embedding, dtype="float32")
+        faiss.normalize_L2(faiss_embedding.reshape(1, -1))
+        
+        self.ltm_index.add(faiss_embedding.reshape(1, -1))
         self.ltm_corpus.append(interaction)
+        
+        # Supabase Remote LTM
+        try:
+            
+            node_client.save_memory(
+                user_id=user_id,
+                content=text,
+                session_id=session_id,
+                importance=1.0,
+                embedding=[float(x) for x in embedding] 
+            )
+            # If we were to pass embedding, we'd do: embedding=[float(x) for x in embedding]
+        except Exception as e:
+            logging.warning(f"Failed to sync memory to Supabase: {e}")
 
     def retrieve_context(self, query: str, k: int = 5) -> Dict:
         """Retrieve relevant context from all 3 layers."""
@@ -89,29 +113,40 @@ class MemorySystem:
             "emotional_profile": recent_emotions
         }
 
-    def save(self):
-        """Persist LTM and emotional memory to disk."""
-        # Save LTM Index
-        faiss.write_index(self.ltm_index, os.path.join(self.base_path, "ltm_index.faiss"))
-        # Save LTM Corpus
-        with open(os.path.join(self.base_path, "ltm_corpus.json"), "w") as f:
-            json.dump(self.ltm_corpus, f)
-        # Save Emotional History
-        with open(os.path.join(self.base_path, "emotional_history.json"), "w") as f:
-            json.dump(self.emotional_history, f)
-
-    def load(self):
-        """Load memory from disk."""
-        idx_path = os.path.join(self.base_path, "ltm_index.faiss")
-        if os.path.exists(idx_path):
-            self.ltm_index = faiss.read_index(idx_path)
-        
-        corpus_path = os.path.join(self.base_path, "ltm_corpus.json")
-        if os.path.exists(corpus_path):
-            with open(corpus_path, "r") as f:
-                self.ltm_corpus = json.load(f)
-        
-        eh_path = os.path.join(self.base_path, "emotional_history.json")
-        if os.path.exists(eh_path):
-            with open(eh_path, "r") as f:
-                self.emotional_history = json.load(f)
+    def initialize_from_remote(self, user_id: str, node_client):
+        """Load past memories from the Node backend to rebuild local FAISS LTM."""
+        try:
+            memories = node_client.get_user_memories(user_id, limit=200)
+            
+            for mem in memories:
+                content = mem.get("content", "")
+                if not content:
+                    continue
+                
+                # Split the single string back into user and assistant fields
+                parts = content.split("\nDreamTalk responded: ")
+                if len(parts) == 2 and parts[0].startswith("User said: "):
+                    user_str = parts[0][len("User said: "):]
+                    asst_str = parts[1]
+                else:
+                    user_str = content
+                    asst_str = ""
+                    
+                interaction = {
+                    "user": user_str,
+                    "assistant": asst_str,
+                    "emotion": {},
+                    "timestamp": mem.get("created_at", "")
+                }
+                
+                # TODO: Remove local re-encoding once Node backend's getUserMemories selects the embedding column.
+                embedding = self.ltm_model.encode([content])[0]
+                faiss_embedding = np.array(embedding, dtype="float32")
+                faiss.normalize_L2(faiss_embedding.reshape(1, -1))
+                
+                self.ltm_index.add(faiss_embedding.reshape(1, -1))
+                self.ltm_corpus.append(interaction)
+                
+            logging.info(f"Initialized {len(self.ltm_corpus)} memories from remote for user {user_id}.")
+        except Exception as e:
+            logging.warning(f"Failed to initialize memory from remote: {e}")
