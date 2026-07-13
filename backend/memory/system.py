@@ -4,12 +4,19 @@ Memory System for DreamTalk.
 """
 
 import os
-import json
 import faiss
 import numpy as np
 import logging
 from typing import List, Dict, Optional
 from sentence_transformers import SentenceTransformer
+
+try:
+    from node_client import node_client as default_node_client
+except Exception:
+    try:
+        from backend.node_client import node_client as default_node_client
+    except Exception:
+        default_node_client = None
 
 class MemorySystem:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
@@ -26,10 +33,7 @@ class MemorySystem:
         
         # Layer 3: Emotional Memory
         self.emotional_history: List[Dict] = []
-        
-        # Persistent storage paths
-        self.base_path = "data/memory"
-        os.makedirs(self.base_path, exist_ok=True)
+        self.default_user_id = os.getenv("DREAMTALK_USER_ID", "default_user")
 
     def next_turn(self, session_id: str) -> int:
         if session_id not in self.turn_counters:
@@ -37,8 +41,20 @@ class MemorySystem:
         self.turn_counters[session_id] += 1
         return self.turn_counters[session_id]
 
-    def add_interaction(self, user_input: str, response: str, emotion: Dict, user_id: str, session_id: str, node_client):
+    def add_interaction(
+        self,
+        user_input: str,
+        response: str,
+        emotion: Dict,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        node_client=None,
+    ):
         """Add a complete interaction to the 3-layer memory system."""
+        user_id = user_id or self.default_user_id
+        session_id = session_id or "default"
+        node_client = node_client or default_node_client
+
         interaction = {
             "user": user_input,
             "assistant": response,
@@ -51,18 +67,25 @@ class MemorySystem:
         if len(self.stm) > self.stm_limit:
             # When STM overflows, push oldest to LTM
             oldest = self.stm.pop(0)
-            self._add_to_ltm(oldest, user_id, session_id, node_client)
+            self._add_to_ltm(oldest)
             
         # Update Emotional Memory
         self.emotional_history.append({
-            "emotion": emotion["name"],
-            "vad": emotion["vad"],
+            "emotion": emotion.get("name", "neutral"),
+            "vad": emotion.get("vad", emotion.get("pad", [0.0, 0.0, 0.0])),
             "timestamp": interaction["timestamp"]
         })
 
-    def _add_to_ltm(self, interaction: Dict, user_id: str, session_id: str, node_client):
+        # Persist every turn remotely. Waiting for STM overflow would hide the
+        # first 20 chats from Supabase and make the frontend look disconnected.
+        self._sync_memory_to_remote(interaction, user_id, session_id, node_client)
+
+    def _interaction_to_text(self, interaction: Dict) -> str:
+        return f"User said: {interaction['user']}\nDreamTalk responded: {interaction['assistant']}"
+
+    def _add_to_ltm(self, interaction: Dict):
         """Push interaction to the vector database."""
-        text = f"User said: {interaction['user']}\nDreamTalk responded: {interaction['assistant']}"
+        text = self._interaction_to_text(interaction)
         embedding = self.ltm_model.encode([text])[0]
         
         # Local FAISS LTM
@@ -71,18 +94,23 @@ class MemorySystem:
         
         self.ltm_index.add(faiss_embedding.reshape(1, -1))
         self.ltm_corpus.append(interaction)
-        
+
+    def _sync_memory_to_remote(self, interaction: Dict, user_id: str, session_id: str, node_client):
+        """Persist an interaction to the Node backend/Supabase if available."""
+        if node_client is None:
+            logging.warning("Skipping Supabase memory sync: node_client is unavailable.")
+            return
+
+        text = self._interaction_to_text(interaction)
+
         # Supabase Remote LTM
         try:
-            
             node_client.save_memory(
                 user_id=user_id,
                 content=text,
                 session_id=session_id,
                 importance=1.0,
-                embedding=[float(x) for x in embedding] 
             )
-            # If we were to pass embedding, we'd do: embedding=[float(x) for x in embedding]
         except Exception as e:
             logging.warning(f"Failed to sync memory to Supabase: {e}")
 
@@ -113,16 +141,19 @@ class MemorySystem:
             "emotional_profile": recent_emotions
         }
 
-    def initialize_from_remote(self, user_id: str, node_client):
+    def initialize_from_remote(self, user_id: str, node_client=None):
         """Load past memories from the Node backend to rebuild local FAISS LTM."""
+        node_client = node_client or default_node_client
+        if node_client is None:
+            logging.warning("Skipping remote memory initialization: node_client is unavailable.")
+            return
+
         try:
             memories = node_client.get_user_memories(user_id, limit=200)
-            
             for mem in memories:
                 content = mem.get("content", "")
                 if not content:
                     continue
-                
                 # Split the single string back into user and assistant fields
                 parts = content.split("\nDreamTalk responded: ")
                 if len(parts) == 2 and parts[0].startswith("User said: "):
@@ -131,22 +162,18 @@ class MemorySystem:
                 else:
                     user_str = content
                     asst_str = ""
-                    
                 interaction = {
                     "user": user_str,
                     "assistant": asst_str,
                     "emotion": {},
                     "timestamp": mem.get("created_at", "")
                 }
-                
                 # TODO: Remove local re-encoding once Node backend's getUserMemories selects the embedding column.
                 embedding = self.ltm_model.encode([content])[0]
                 faiss_embedding = np.array(embedding, dtype="float32")
                 faiss.normalize_L2(faiss_embedding.reshape(1, -1))
-                
                 self.ltm_index.add(faiss_embedding.reshape(1, -1))
                 self.ltm_corpus.append(interaction)
-                
             logging.info(f"Initialized {len(self.ltm_corpus)} memories from remote for user {user_id}.")
         except Exception as e:
             logging.warning(f"Failed to initialize memory from remote: {e}")

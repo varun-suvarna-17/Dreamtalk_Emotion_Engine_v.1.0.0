@@ -8,8 +8,10 @@ Automatic failover: if Groq is unavailable, falls back to Ollama seamlessly.
 import os
 import logging
 import asyncio
+from pathlib import Path
 from typing import List, Dict, AsyncGenerator
 
+from dotenv import load_dotenv
 from groq import AsyncGroq
 import ollama as _ollama  # official ollama python client
 
@@ -30,6 +32,8 @@ class LLMService:
     """
 
     def __init__(self, model_name: str = None):
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
         self.preferred_provider = os.environ.get("LLM_PROVIDER", "groq").strip().lower()
         self.active_provider = self.preferred_provider  # can change at runtime
         self.system_prompt = ""
@@ -76,6 +80,9 @@ class LLMService:
     # ------------------------------------------------------------------
     async def _generate_groq(self, messages: List[Dict]) -> str:
         """Non-streaming call via Groq Cloud. Raises on failure."""
+        if self.groq_client is None:
+            raise RuntimeError("GROQ_API_KEY is not configured; Groq client was not initialized.")
+
         full_messages = [{"role": "system", "content": self.system_prompt}] + messages
         response = await self.groq_client.chat.completions.create(
             model=self.groq_model,
@@ -100,6 +107,9 @@ class LLMService:
 
     async def _stream_groq(self, messages: List[Dict]) -> AsyncGenerator[str, None]:
         """Streaming call via Groq Cloud. Raises on failure."""
+        if self.groq_client is None:
+            raise RuntimeError("GROQ_API_KEY is not configured; Groq client was not initialized.")
+
         full_messages = [{"role": "system", "content": self.system_prompt}] + messages
         stream = await self.groq_client.chat.completions.create(
             model=self.groq_model,

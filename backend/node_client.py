@@ -16,7 +16,11 @@ Environment variables:
 
 import os
 import requests
+from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 NODE_BACKEND_URL = os.getenv("NODE_BACKEND_URL", "http://localhost:3000")
 BRAIN_API_KEY    = os.getenv("BRAIN_API_KEY", "")

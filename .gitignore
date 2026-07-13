@@ -7,11 +7,11 @@
 /frontend/yarn-error.log*
 
 # Python and Backend
-/__pycache__/
+**/__pycache__/
 *.pyc
 *.log
 /.venv/
-/data/
+**/data/
 /configs/
 
 # Environment variables
@@ -25,3 +25,9 @@
 Thumbs.db
 node_modules/
 .env
+
+
+__pycache__/
+*.pyc
+.next/
+node_modules/

@@ -3,8 +3,8 @@ Brain Module Backend for DreamTalk.
 Standalone system focused on Thinking, Emotion, Personality, and Memory.
 """
 
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
@@ -13,39 +13,19 @@ import uvicorn
 import sys
 import os
 import asyncio
-import logging
 from dotenv import load_dotenv
 
-load_dotenv()
-
-# Sentiment analyser (shared instance — lightweight, thread-safe)
-_vader = SentimentIntensityAnalyzer()
-
 # Ensure all modules are in path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+sys.path.append(BASE_DIR)
 
 from emotion.engine import PADEmotionEngine
 from memory.system import MemorySystem
 from models.brain import NeuralBrainSimulation, BigFiveTraits
 from llm.service import LLMService, PromptCompiler
-from node_client import node_client
 
-DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"  # TODO: replace with real auth
-
-# ---------------------------------------------------------------------------
-# Fix 3 — FastAPI lifespan (replaces deprecated @app.on_event)
-# ---------------------------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Load memory on startup; persist it incrementally."""
-    try:
-        memory_system.initialize_from_remote(DEFAULT_USER_ID, node_client)
-    except Exception as e:
-        logging.warning(f"Failed to initialize memory from remote on startup: {e}")
-    yield
-    # Removed memory_system.save() as persistence happens incrementally now
-
-app = FastAPI(title="DreamTalk Brain Module API", lifespan=lifespan)
+app = FastAPI(title="DreamTalk Brain Module API")
 
 # Enable CORS
 app.add_middleware(
@@ -91,20 +71,9 @@ class PersonaUpdate(BaseModel):
 @app.post("/chat")
 async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     try:
-        session_id = request.session_id
-        if not session_id or session_id == "default":
-            try:
-                session_data = node_client.start_session(user_id=DEFAULT_USER_ID, scenario_name="general_chat")
-                session_id = session_data["id"]
-            except Exception as e:
-                logging.warning(f"Failed to start session via node_client: {e}")
-                session_id = "default"
-                
-        turn_index = memory_system.next_turn(session_id)
-
-        # 1. Fix 1 — Dynamic VADER sentiment → PAD Stimulus
-        scores = _vader.polarity_scores(request.user_input)
-        sentiment_score = scores["compound"]  # Range: -1.0 (very negative) to +1.0 (very positive)
+        # 1. Analyze input -> PAD Stimulus
+        # Simulating sentiment analysis for the stimulus
+        sentiment_score = 0.0 # This would be replaced by a real sentiment model
         stimulus = emotion_engine.stimulus_from_sentiment(sentiment_score)
 
         # 2. Update Emotional State
@@ -135,63 +104,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         response = await llm_service.generate_response_async(messages)
 
         # 7. Update Memory with the new interaction
-        memory_system.add_interaction(
-            request.user_input, 
-            response, 
-            current_emotion,
-            DEFAULT_USER_ID,
-            session_id,
-            node_client
-        )
+        memory_system.add_interaction(request.user_input, response, current_emotion)
         
-        # 8. Background Tasks for Supabase syncing
-        def sync_to_supabase():
-            try:
-                node_client.save_message(
-                    session_id=session_id,
-                    user_id=DEFAULT_USER_ID,
-                    turn_index=turn_index,
-                    user_content=request.user_input,
-                    assistant_content=response
-                )
-            except Exception as e:
-                logging.warning(f"Failed to save message: {e}")
-                
-            try:
-                node_client.save_pad_snapshot(
-                    session_id=session_id,
-                    user_id=DEFAULT_USER_ID,
-                    turn_index=turn_index,
-                    pleasure=current_emotion["pad"][0],
-                    arousal=current_emotion["pad"][1],
-                    dominance=current_emotion["pad"][2]
-                )
-            except Exception as e:
-                logging.warning(f"Failed to save PAD snapshot: {e}")
-                
-            try:
-                node_client.log_emotion(
-                    session_id=session_id,
-                    user_id=DEFAULT_USER_ID,
-                    turn_index=turn_index,
-                    user_pleasure=sentiment_score,
-                    user_arousal=abs(sentiment_score),
-                    pad_pleasure=current_emotion["pad"][0],
-                    pad_arousal=current_emotion["pad"][1],
-                    pad_dominance=current_emotion["pad"][2],
-                    emotion_label=current_emotion["name"],
-                    memory_action="USE_STM",
-                    response_style="default",
-                    inertia_strength=emotion_engine.inertia,
-                    reward=0.0,
-                    verdict="N/A",
-                    relationship_delta=0.0
-                )
-            except Exception as e:
-                logging.warning(f"Failed to log emotion: {e}")
-
-        background_tasks.add_task(sync_to_supabase)
-
         return {
             "response": response,
             "emotion": current_emotion,
