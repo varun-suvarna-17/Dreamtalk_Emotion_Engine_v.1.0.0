@@ -47,18 +47,22 @@ class MemorySystem:
         response: str,
         emotion: Dict,
         user_id: Optional[str] = None,
+        avatar_id: Optional[str] = None,
         session_id: Optional[str] = None,
         node_client=None,
     ):
         """Add a complete interaction to the 3-layer memory system."""
         user_id = user_id or self.default_user_id
         session_id = session_id or "default"
+        if avatar_id and not session_id.startswith(f"{avatar_id}:"):
+            session_id = f"{avatar_id}:{session_id}"
         node_client = node_client or default_node_client
 
         interaction = {
             "user": user_input,
             "assistant": response,
             "emotion": emotion,
+            "avatar_id": avatar_id,
             "timestamp": np.datetime64('now').astype(str)
         }
         
